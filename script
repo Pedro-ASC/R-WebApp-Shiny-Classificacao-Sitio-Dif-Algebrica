@@ -1,0 +1,190 @@
+library(cmrinvflor)
+library(shiny)
+library(shinythemes)
+
+####################
+# Ajuste do modelo #
+####################
+
+#Chapman & Richards Polimórfico
+modelo<-"hdom2~b0*((hdom1/b0)^((idade1/idade2)^b2))"
+parms_start<-list(b0=51.58351, b2=0.77542)
+
+ifc<-read.csv2(file.path("ifc.csv"), fileEncoding = 'latin1')
+
+ifc<-ifc[,c('parcela','idade','hdom')]
+
+ifc_pareado<-pairSequence(ifc)
+
+aj <- nls(formula = modelo,
+          data = ifc_pareado,
+          start = parms_start)
+
+parms=as.list(coef(aj))
+
+equation<-list(
+  desc_model='Chapman & Richards Polimórfico',
+  required_variables=c('hdom2','hdom1','idade1','idade2'),
+  interest_variable='hdom2',
+  fpred=function(x,ps) ps$b0*((x$hdom1/ps$b0)^((x$idade1/x$idade2)^ps$b2)),
+  parms=parms
+)
+
+###################################
+# Definição dos limites de classe #
+###################################
+
+equation$present_age_variable="idade1"
+equation$future_age_variable="idade2"
+equation$present_dominant_height_variable="hdom1"
+equation$future_dominant_height_variable="hdom2"
+
+ifc<-read.csv2(file.path("ifc.csv"), fileEncoding = 'latin1')
+
+ifc<-ifc[,c('parcela','idade','hdom')]
+
+names(ifc)<-c('id','idade1','hdom1')
+
+reference_age<-72  #Idade de referência na mesma escala do vetor ifc$idade1
+site_class_limits<-NA
+way_counting_migrations=1
+plot_curves<-T
+
+x11(); #Inputs necessários abaixo
+cls<-siteClassificationAlgebraicDifference(
+  equation = equation,
+  continuous_sample_plots = ifc,
+  reference_age = reference_age,
+  site_class_limits = site_class_limits,
+  way_counting_migrations = way_counting_migrations,
+  plot_curves=plot_curves
+)
+
+parc <- cls$continuous_sample_plots
+classes <- cls$classes
+estabilidade <- cls$estabilidade
+ncurvas <- nrow(classes)
+dados_graf <- parc[order(parc[[equation$present_age_variable]]),]
+
+#########
+# Shiny #
+#########
+######
+# UI #
+######
+ui <- fluidPage(
+  theme = shinytheme("slate"),
+  titlePanel("Classificação de Sítio"),
+  
+  sidebarLayout(
+    sidebarPanel(
+      selectInput("estabilidade", "Número de Mudanças:", choices = unique(parc$nmudou)),
+      actionButton("criar", "Criar Lista de Parcelas"),
+      hr(),
+      selectInput("parc", "Número da Parcela:", choices = NULL),
+      actionButton("mostrar", "Mostrar Gráfico"),
+      hr(),
+      numericInput("Nova_classe", "Nova Classificação:", value = NA, min = 1, max = 5),
+      actionButton("reclassificar", "Reclassificar Parcela")
+    ),
+    
+    mainPanel(
+      h3("Classificação por Parcela"),
+      plotOutput("graf", height = "600px"),
+      br(),
+      h4("Classe por ponto"),
+      tableOutput("tabela_classes")
+    )
+  )
+)
+
+##########
+# Server #
+##########
+
+server <- function(input, output, session) {
+  gatilho_reclass <- reactiveVal(0)
+  parcelas_filtradas <- reactiveVal(NULL)
+  observeEvent(input$criar, {
+    req(!is.na(input$estabilidade))
+    
+    parcelas <- parc$id[parc$nmudou == input$estabilidade]
+    
+    parcelas_filtradas(parcelas)
+    
+    if (length(parcelas) > 0) {
+      updateSelectInput(session, "parc", 
+                        label = "Número da Parcela:",
+                        choices = parcelas,
+                        selected = parcelas[1])
+    } else {
+      updateSelectInput(session, "parc",
+                        label = "Número da Parcela:",
+                        choices = character(0))
+      
+      showNotification("Nenhuma parcela encontrada com esse número de mudanças.", type = "warning")
+    }
+  })
+  
+  output$graf <- renderPlot({
+    req(input$mostrar)
+    isolate({
+      req(input$parc)
+      
+      parcela_filtrada <- subset(parc, id == input$parc)
+      
+      plot(parcela_filtrada$idade1, parcela_filtrada$hdom1,
+           pch = "*", col = "red", ylim = c(0, 40),
+           xlab = "Idade", ylab = "Altura Dominante", main = paste("Parcela", input$parc))
+      
+      for (i in ncurvas:1) {
+        lines(dados_graf[[equation$present_age_variable]], 
+              dados_graf[, classes[i, 1]], col = i)
+      }
+    })
+  })
+  
+  output$tabela_classes <- renderTable({
+    req(input$mostrar)
+    gatilho_reclass()
+    
+    isolate({
+      req(input$parc)
+      parcela_filtrada <- subset(parc, id == input$parc)
+      
+      tabela <- parcela_filtrada[, c("idade1", "hdom1", "is", "nis")]
+      tabela <- tabela[complete.cases(tabela), ]
+      colnames(tabela) <- c("idade1", "hdom1", "is", "nis")
+      tabela$is <- as.integer(tabela$is)
+      tabela$nis <- as.integer(tabela$nis)
+      tabela
+    })
+  })
+  
+  observeEvent(input$reclassificar, {
+    req(input$parc)
+    req(input$Nova_classe)
+    
+    idx <- which(parc$id == input$parc)
+    
+    if(length(idx) == 0) {
+      showNotification("Parcela não encontrada!", type = "error")
+    } else {
+      parc$nis[idx] <<- input$Nova_classe
+      showNotification(
+        paste("Parcela", input$parc, "reclassificada para classe", input$Nova_classe),
+        type = "message",
+        duration = 5
+      )
+      gatilho_reclass(gatilho_reclass() + 1)
+    }
+  })
+}
+
+
+##################
+# Criação do app #
+##################
+
+shinyApp(ui = ui, server = server)
+
